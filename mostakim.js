@@ -1,12 +1,22 @@
 process.on('unhandledRejection', (error, promise) => {
-	log.error('UNHANDLED_REJECTION', error.message || error);
-	// Don't store the promise to avoid memory leak
-	// Just log and continue
+	// Import log safely after checking
+	try {
+		const log = require('./util/log.js');
+		log.error('UNHANDLED_REJECTION', error.message || error);
+	} catch (e) {
+		console.error('UNHANDLED_REJECTION', error.message || error);
+	}
 });
 
 process.on('uncaughtException', (error) => {
-	log.error('UNCAUGHT_EXCEPTION', error.message || error);
-	log.error('UNCAUGHT_EXCEPTION', error.stack || 'No stack trace');
+	try {
+		const log = require('./util/log.js');
+		log.error('UNCAUGHT_EXCEPTION', error.message || error);
+		log.error('UNCAUGHT_EXCEPTION', error.stack || 'No stack trace');
+	} catch (e) {
+		console.error('UNCAUGHT_EXCEPTION', error.message || error);
+		console.error('UNCAUGHT_EXCEPTION', error.stack || 'No stack trace');
+	}
 	// Give time for logs to flush before exiting
 	setTimeout(() => process.exit(1), 1000);
 });
@@ -75,8 +85,22 @@ class TTLMap extends Map {
 const axios = require("axios");
 const fs = require("fs-extra");
 const { execSync } = require('child_process');
-const log = require('./util/log.js');
 const path = require("path");
+
+// Import log utility with error handling
+let log;
+try {
+	log = require('./util/log.js');
+} catch (e) {
+	console.warn('Warning: util/log.js not found, using console fallback');
+	log = {
+		error: console.error,
+		warn: console.warn,
+		info: console.info,
+		success: (label, msg) => console.log(`✓ ${label}: ${msg}`),
+		master: (label, msg) => console.log(`★ ${label}: ${msg}`)
+	};
+}
 
 process.env.BLUEBIRD_W_FORGOTTEN_RETURN = 0; // Disable warning: "Warning: a promise was created in a handler but was not returned from it"
 
@@ -109,6 +133,7 @@ for (const pathDir of [dirConfig, dirConfigCommands]) {
                 process.exit(0);
         }
 }
+
 const config = require(dirConfig);
 if (config.whiteListMode?.whiteListIds && Array.isArray(config.whiteListMode.whiteListIds))
         config.whiteListMode.whiteListIds = config.whiteListMode.whiteListIds.map(id => id.toString());
@@ -180,9 +205,15 @@ global.client = {
         commandBanned: configCommands.commandBanned
 };
 
-const utils = require("./utils.js");
-global.utils = utils;
-const { colors } = utils;
+let utils;
+try {
+	utils = require("./utils.js");
+	global.utils = utils;
+} catch (e) {
+	log.warn("UTILS", "utils.js not fully loaded, some features may be limited");
+	utils = { log };
+}
+
 const shutdownManager = require("./includes/listen.js");
 
 // Initialize global.temp with size-limited data structures
@@ -247,7 +278,7 @@ global.GoatBot.envCommands = global.GoatBot.configCommands.envCommands;
 global.GoatBot.envEvents = global.GoatBot.configCommands.envEvents;
 
 // ———————————————— LOAD LANGUAGE ———————————————— //
-const getText = global.utils.getText;
+const getText = (utils && utils.getText) ? utils.getText : () => "";
 
 /**
  * MemoryManager - Monitors and manages memory to prevent leaks and ensure long-term stability
@@ -336,6 +367,7 @@ class MemoryManager {
 		}
 
 		// Force garbage collection if available
+		const memUsage = process.memoryUsage();
 		if (global.gc && memUsage.heapUsed > this.options.heapThreshold * 1.5) {
 			global.gc();
 			cleaned++;
@@ -382,35 +414,45 @@ const memoryManager = new MemoryManager();
 if (config.autoRestart) {
         const time = config.autoRestart.time;
         if (!isNaN(time) && time > 0) {
-                utils.log.info("AUTO RESTART", getText("MOSTAKIM-V2-BOT", "autoRestart1", utils.convertTime(time, true)));
+                log.info("AUTO RESTART", getText("MOSTAKIM-V2-BOT", "autoRestart1", time));
                 setTimeout(() => {
-                        utils.log.info("AUTO RESTART", "Restarting...");
+                        log.info("AUTO RESTART", "Restarting...");
                         process.exit(2);
                 }, time);
         }
         else if (typeof time == "string" && time.match(/^((((\d+,)+\d+|(\d+(\/|-|#)\d+)|\d+L?|\*(\/\d+)?|L(-\d+)?|\?|[A-Z]{3}(-[A-Z]{3})?) ?){5,7})$/gmi)) {
-                utils.log.info("AUTO RESTART", getText("Goat", "autoRestart2", time));
-                const cron = require("node-cron");
-                cron.schedule(time, () => {
-                        utils.log.info("AUTO RESTART", "Restarting...");
-                        process.exit(2);
-                });
+                log.info("AUTO RESTART", `Auto restart scheduled: ${time}`);
+                try {
+                	const cron = require("node-cron");
+                	cron.schedule(time, () => {
+                		log.info("AUTO RESTART", "Restarting...");
+                		process.exit(2);
+                	});
+                } catch (e) {
+                	log.warn("AUTO RESTART", "node-cron not installed, auto restart disabled");
+                }
         }
 }
 
 (async () => {
         // ———————————————— CHECK VERSION ———————————————— //
-        const { data: { version } } = await axios.get("https://raw.githubusercontent.com/mostakim-broh/MOSTAKIM-V2-BOT/main/package.json");
-        const currentVersion = require("./package.json").version;
-        if (utils.compareVersion(version, currentVersion) === 1)
-                utils.log.master("NEW VERSION", getText(
-                        "MOSTAKIM-V2-BOT",
-                        "newVersionDetected",
-                        colors.gray(currentVersion),
-                        colors.hex("#eb6a07", version),
-                        colors.hex("#eb6a07", "node update")
-                ));
+        try {
+                const { data: { version } } = await axios.get("https://raw.githubusercontent.com/mostakim-broh/MOSTAKIM-V2-BOT/main/package.json");
+                const currentVersion = require("./package.json").version;
+                const colors = (utils && utils.colors) ? utils.colors : { gray: (s) => s, hex: (c, s) => s };
+                
+                if (utils.compareVersion && utils.compareVersion(version, currentVersion) === 1) {
+                        log.master("NEW VERSION", `Current: ${colors.gray(currentVersion)} | Latest: ${colors.hex("#eb6a07", version)} | Run: ${colors.hex("#eb6a07", "node update")}`);
+                }
+        } catch (e) {
+                log.warn("VERSION CHECK", "Could not check for new version");
+        }
+        
         // ———————————————————— LOGIN ———————————————————— //
-        require('./bot/login/login.js');
+        try {
+                require('./bot/login/login.js');
+        } catch (e) {
+                log.error("LOGIN", "Failed to load login module: " + e.message);
+                process.exit(1);
+        }
 })();
-
